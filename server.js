@@ -17,7 +17,7 @@ app.get('/', (req, res) => {
 app.post('/v1/chat/completions', async (req, res) => {
     try {
         // FIXED: Added the mandatory API endpoint path required by OpenRouter
-        const targetUrl = 'https://openrouter.ai';
+        const targetUrl = 'https://openrouter.ai/api/v1/chat/completions';
         
         // Setup headers, embedding your private OpenRouter Key hidden in Render environment settings
         const headers = {
