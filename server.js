@@ -13,13 +13,13 @@ app.get('/', (req, res) => {
     res.status(200).send('Proxy status: Online and running.');
 });
 
-// The core endpoint Janitor AI sends chat requests to
-app.post('/v1/chat/completions', async (req, res) => {
+// Listens to /v1, /v1/chat/completions, or /chat/completions regardless of how JanitorAI formats it
+app.post(['/v1', '/v1/chat/completions', '/chat/completions'], async (req, res) => {
     try {
-        // FIXED: Added the mandatory API endpoint path required by OpenRouter
+        // Correct OpenRouter API endpoint
         const targetUrl = 'https://openrouter.ai/api/v1/chat/completions';
         
-        // Setup headers, embedding your private OpenRouter Key hidden in Render environment settings
+        // Setup headers using your private OpenRouter Key hidden in Render environment settings
         const headers = {
             'Authorization': `Bearer ${process.env.OPENROUTER_API_KEY}`,
             'Content-Type': 'application/json',
@@ -27,7 +27,7 @@ app.post('/v1/chat/completions', async (req, res) => {
             'X-Title': 'JanitorAI Custom Render Proxy'
         };
 
-        // Check if Janitor AI requested streaming (real-time typing effect)
+        // Check if Janitor AI requested streaming
         if (req.body.stream) {
             res.setHeader('Content-Type', 'text/event-stream');
             res.setHeader('Cache-Control', 'no-cache');
@@ -41,10 +41,8 @@ app.post('/v1/chat/completions', async (req, res) => {
                 responseType: 'stream'
             });
 
-            // Stream chunked bits of model data right back to the client interface
             response.data.pipe(res);
         } else {
-            // Standard static response fallback
             const response = await axios.post(targetUrl, req.body, { headers });
             res.status(200).json(response.data);
         }
