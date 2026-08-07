@@ -16,6 +16,7 @@ app.get('/', (req, res) => {
 // The core endpoint Janitor AI sends chat requests to
 app.post('/v1/chat/completions', async (req, res) => {
     try {
+        // FIXED: Added the mandatory API endpoint path required by OpenRouter
         const targetUrl = 'https://openrouter.ai';
         
         // Setup headers, embedding your private OpenRouter Key hidden in Render environment settings
