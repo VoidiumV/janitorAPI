@@ -4,30 +4,25 @@ const axios = require('axios');
 
 const app = express();
 
-// Enable CORS so Janitor AI can safely communicate with your Render server
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 
-// Health check route for Render's automatic deployment verification
 app.get('/', (req, res) => {
     res.status(200).send('Proxy status: Online and running.');
 });
 
-// Listens to /v1, /v1/chat/completions, or /chat/completions regardless of how JanitorAI formats it
+// Handles requests from JanitorAI
 app.post(['/v1', '/v1/chat/completions', '/chat/completions'], async (req, res) => {
     try {
-        // Correct OpenRouter API endpoint
-        const targetUrl = 'https://openrouter.ai/api/v1/chat/completions';
+        // Google's official OpenAI-compatible endpoint
+        const targetUrl = 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions';
         
-        // Setup headers using your private OpenRouter Key hidden in Render environment settings
+        // Pass your Google AI Studio API Key
         const headers = {
-            'Authorization': `Bearer ${process.env.OPENROUTER_API_KEY}`,
-            'Content-Type': 'application/json',
-            'HTTP-Referer': 'https://render.com', 
-            'X-Title': 'JanitorAI Custom Render Proxy'
+            'Authorization': `Bearer ${process.env.GEMINI_API_KEY}`,
+            'Content-Type': 'application/json'
         };
 
-        // Check if Janitor AI requested streaming
         if (req.body.stream) {
             res.setHeader('Content-Type', 'text/event-stream');
             res.setHeader('Cache-Control', 'no-cache');
@@ -48,9 +43,9 @@ app.post(['/v1', '/v1/chat/completions', '/chat/completions'], async (req, res) 
         }
 
     } catch (error) {
-        console.error('Proxy Error:', error.message);
+        console.error('Proxy Error:', error.response?.data || error.message);
         const statusCode = error.response?.status || 500;
-        const errorData = error.response?.data || { error: 'Internal proxy communication failure.' };
+        const errorData = error.response?.data || { error: 'Proxy communication failure.' };
         res.status(statusCode).json(errorData);
     }
 });
