@@ -11,46 +11,79 @@ app.get('/', (req, res) => {
     res.status(200).send('Proxy status: Online and running.');
 });
 
-// Handles requests from JanitorAI
 app.post(['/v1', '/v1/chat/completions', '/chat/completions'], async (req, res) => {
     try {
-        const targetUrl = 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions';
-        
-        const headers = {
-            'Authorization': `Bearer ${process.env.GEMINI_API_KEY}`,
-            'Content-Type': 'application/json'
-        };
+        const apiKey = process.env.GEMINI_API_KEY;
+        // Default to gemini-1.5-flash if model isn't recognized
+        let rawModel = req.body.model || 'gemini-2.5-flash';
+        let modelName = rawModel.replace(/^google\//, ''); // strip 'google/' prefix if sent
 
-        // Clone payload and inject Google Safety Settings set to BLOCK_NONE
-        const payload = {
-            ...req.body,
+        // Native Gemini REST API endpoint
+        const targetUrl = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`;
+
+        // Convert OpenAI messages format to Gemini contents format
+        const contents = (req.body.messages || []).map(msg => {
+            let role = msg.role === 'assistant' ? 'model' : 'user';
+            // System prompt messages get passed as user role in basic contents array
+            if (msg.role === 'system') role = 'user';
+            return {
+                role: role,
+                parts: [{ text: msg.content || '' }]
+            };
+        });
+
+        // Construct native Gemini payload with complete safety override
+        const nativePayload = {
+            contents: contents,
             safetySettings: [
                 { category: "HARM_CATEGORY_HARASSMENT", threshold: "BLOCK_NONE" },
                 { category: "HARM_CATEGORY_HATE_SPEECH", threshold: "BLOCK_NONE" },
                 { category: "HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold: "BLOCK_NONE" },
                 { category: "HARM_CATEGORY_DANGEROUS_CONTENT", threshold: "BLOCK_NONE" },
                 { category: "HARM_CATEGORY_CIVIC_INTEGRITY", threshold: "BLOCK_NONE" }
+            ],
+            generationConfig: {
+                temperature: req.body.temperature ?? 0.9,
+                maxOutputTokens: req.body.max_tokens ?? 2000
+            }
+        };
+
+        const response = await axios.post(targetUrl, nativePayload, {
+            headers: { 'Content-Type': 'application/json' }
+        });
+
+        const candidate = response.data.candidates?.[0];
+        const generatedText = candidate?.content?.parts?.[0]?.text || '';
+
+        // If Gemini hard-blocks at the safety evaluation stage before generating text
+        if (candidate?.finishReason === 'SAFETY' || candidate?.finishReason === 'PROHIBITED_CONTENT') {
+             return res.status(200).json({
+                 choices: [{
+                     message: { role: 'assistant', content: "[OOC: The model refused this specific prompt due to hard system safety guidelines.]" },
+                     finish_reason: 'stop'
+                 }]
+             });
+        }
+
+        // Format Gemini response back into standard OpenAI structure for JanitorAI
+        const openAiFormattedResponse = {
+            id: `chatcmpl-${Date.now()}`,
+            object: 'chat.completion',
+            created: Math.floor(Date.now() / 1000),
+            model: modelName,
+            choices: [
+                {
+                    index: 0,
+                    message: {
+                        role: 'assistant',
+                        content: generatedText
+                    },
+                    finish_reason: 'stop'
+                }
             ]
         };
 
-        if (req.body.stream) {
-            res.setHeader('Content-Type', 'text/event-stream');
-            res.setHeader('Cache-Control', 'no-cache');
-            res.setHeader('Connection', 'keep-alive');
-
-            const response = await axios({
-                method: 'post',
-                url: targetUrl,
-                data: payload,
-                headers: headers,
-                responseType: 'stream'
-            });
-
-            response.data.pipe(res);
-        } else {
-            const response = await axios.post(targetUrl, payload, { headers });
-            res.status(200).json(response.data);
-        }
+        res.status(200).json(openAiFormattedResponse);
 
     } catch (error) {
         console.error('Proxy Error:', error.response?.data || error.message);
