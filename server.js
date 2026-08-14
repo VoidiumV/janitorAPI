@@ -14,17 +14,13 @@ app.get('/', (req, res) => {
 app.post(['/v1', '/v1/chat/completions', '/chat/completions'], async (req, res) => {
     try {
         const apiKey = process.env.GEMINI_API_KEY;
-        // Default to gemini-1.5-flash if model isn't recognized
-        let rawModel = req.body.model || 'gemini-2.5-flash';
-        let modelName = rawModel.replace(/^google\//, ''); // strip 'google/' prefix if sent
+        let rawModel = req.body.model || 'gemini-2.0-flash';
+        let modelName = rawModel.replace(/^google\//, '');
 
-        // Native Gemini REST API endpoint
         const targetUrl = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`;
 
-        // Convert OpenAI messages format to Gemini contents format
         const contents = (req.body.messages || []).map(msg => {
             let role = msg.role === 'assistant' ? 'model' : 'user';
-            // System prompt messages get passed as user role in basic contents array
             if (msg.role === 'system') role = 'user';
             return {
                 role: role,
@@ -32,7 +28,6 @@ app.post(['/v1', '/v1/chat/completions', '/chat/completions'], async (req, res) 
             };
         });
 
-        // Construct native Gemini payload with complete safety override
         const nativePayload = {
             contents: contents,
             safetySettings: [
@@ -44,28 +39,41 @@ app.post(['/v1', '/v1/chat/completions', '/chat/completions'], async (req, res) 
             ],
             generationConfig: {
                 temperature: req.body.temperature ?? 0.9,
-                maxOutputTokens: req.body.max_tokens ?? 2000
+                maxOutputTokens: req.body.max_tokens || 1500
             }
         };
 
-        const response = await axios.post(targetUrl, nativePayload, {
-            headers: { 'Content-Type': 'application/json' }
-        });
-
-        const candidate = response.data.candidates?.[0];
-        const generatedText = candidate?.content?.parts?.[0]?.text || '';
-
-        // If Gemini hard-blocks at the safety evaluation stage before generating text
-        if (candidate?.finishReason === 'SAFETY' || candidate?.finishReason === 'PROHIBITED_CONTENT') {
-             return res.status(200).json({
-                 choices: [{
-                     message: { role: 'assistant', content: "[OOC: The model refused this specific prompt due to hard system safety guidelines.]" },
-                     finish_reason: 'stop'
-                 }]
-             });
+        let response;
+        try {
+            response = await axios.post(targetUrl, nativePayload, {
+                headers: { 'Content-Type': 'application/json' }
+            });
+        } catch (apiError) {
+            // Catch Google API errors (like 429 rate limits or 400 bad requests) and format them nicely for JanitorAI
+            console.error('Google API Error:', apiError.response?.data || apiError.message);
+            const errorMsg = apiError.response?.data?.error?.message || 'Google API connection issue.';
+            return res.status(200).json({
+                choices: [{
+                    message: { role: 'assistant', content: `[Proxy Intercept - Error: ${errorMsg}]` },
+                    finish_reason: 'stop'
+                }]
+            });
         }
 
-        // Format Gemini response back into standard OpenAI structure for JanitorAI
+        const candidate = response.data.candidates?.[0];
+        
+        // If Google blocks the response text due to safety triggers, return a safe recovery message instead of crashing
+        if (!candidate || !candidate.content?.parts?.[0]?.text) {
+            return res.status(200).json({
+                choices: [{
+                    message: { role: 'assistant', content: "[OOC: The model hesitated on that phrasing. Try tweaking your message slightly or re-rolling.]" },
+                    finish_reason: 'stop'
+                }]
+            });
+        }
+
+        const generatedText = candidate.content.parts[0].text;
+
         const openAiFormattedResponse = {
             id: `chatcmpl-${Date.now()}`,
             object: 'chat.completion',
@@ -86,10 +94,14 @@ app.post(['/v1', '/v1/chat/completions', '/chat/completions'], async (req, res) 
         res.status(200).json(openAiFormattedResponse);
 
     } catch (error) {
-        console.error('Proxy Error:', error.response?.data || error.message);
-        const statusCode = error.response?.status || 500;
-        const errorData = error.response?.data || { error: 'Proxy communication failure.' };
-        res.status(statusCode).json(errorData);
+        console.error('Fatal Proxy Error:', error.message);
+        // Always return HTTP 200 with an assistant message so JanitorAI never throws pgshag2
+        res.status(200).json({
+            choices: [{
+                message: { role: 'assistant', content: "[Proxy Error Handled: A communication glitch occurred. Try sending your message again.]" },
+                finish_reason: 'stop'
+            }]
+        });
     }
 });
 
