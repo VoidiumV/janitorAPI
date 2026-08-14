@@ -14,13 +14,23 @@ app.get('/', (req, res) => {
 // Handles requests from JanitorAI
 app.post(['/v1', '/v1/chat/completions', '/chat/completions'], async (req, res) => {
     try {
-        // Google's official OpenAI-compatible endpoint
         const targetUrl = 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions';
         
-        // Pass your Google AI Studio API Key
         const headers = {
             'Authorization': `Bearer ${process.env.GEMINI_API_KEY}`,
             'Content-Type': 'application/json'
+        };
+
+        // Clone payload and inject Google Safety Settings set to BLOCK_NONE
+        const payload = {
+            ...req.body,
+            safetySettings: [
+                { category: "HARM_CATEGORY_HARASSMENT", threshold: "BLOCK_NONE" },
+                { category: "HARM_CATEGORY_HATE_SPEECH", threshold: "BLOCK_NONE" },
+                { category: "HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold: "BLOCK_NONE" },
+                { category: "HARM_CATEGORY_DANGEROUS_CONTENT", threshold: "BLOCK_NONE" },
+                { category: "HARM_CATEGORY_CIVIC_INTEGRITY", threshold: "BLOCK_NONE" }
+            ]
         };
 
         if (req.body.stream) {
@@ -31,14 +41,14 @@ app.post(['/v1', '/v1/chat/completions', '/chat/completions'], async (req, res) 
             const response = await axios({
                 method: 'post',
                 url: targetUrl,
-                data: req.body,
+                data: payload,
                 headers: headers,
                 responseType: 'stream'
             });
 
             response.data.pipe(res);
         } else {
-            const response = await axios.post(targetUrl, req.body, { headers });
+            const response = await axios.post(targetUrl, payload, { headers });
             res.status(200).json(response.data);
         }
 
