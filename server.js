@@ -28,51 +28,38 @@ app.post(['/v1', '/v1/chat/completions', '/chat/completions'], async (req, res) 
             };
         });
 
+        // Using 'OFF' instead of 'BLOCK_NONE' to completely disable filter blocks
         const nativePayload = {
             contents: contents,
             safetySettings: [
-                { category: "HARM_CATEGORY_HARASSMENT", threshold: "BLOCK_NONE" },
-                { category: "HARM_CATEGORY_HATE_SPEECH", threshold: "BLOCK_NONE" },
-                { category: "HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold: "BLOCK_NONE" },
-                { category: "HARM_CATEGORY_DANGEROUS_CONTENT", threshold: "BLOCK_NONE" },
-                { category: "HARM_CATEGORY_CIVIC_INTEGRITY", threshold: "BLOCK_NONE" }
+                { category: "HARM_CATEGORY_HARASSMENT", threshold: "OFF" },
+                { category: "HARM_CATEGORY_HATE_SPEECH", threshold: "OFF" },
+                { category: "HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold: "OFF" },
+                { category: "HARM_CATEGORY_DANGEROUS_CONTENT", threshold: "OFF" },
+                { category: "HARM_CATEGORY_CIVIC_INTEGRITY", threshold: "OFF" }
             ],
             generationConfig: {
                 temperature: req.body.temperature ?? 0.9,
-                maxOutputTokens: req.body.max_tokens || 1500
+                maxOutputTokens: req.body.max_tokens || 2000
             }
         };
 
-        let response;
-        try {
-            response = await axios.post(targetUrl, nativePayload, {
-                headers: { 'Content-Type': 'application/json' }
-            });
-        } catch (apiError) {
-            // Catch Google API errors (like 429 rate limits or 400 bad requests) and format them nicely for JanitorAI
-            console.error('Google API Error:', apiError.response?.data || apiError.message);
-            const errorMsg = apiError.response?.data?.error?.message || 'Google API connection issue.';
-            return res.status(200).json({
-                choices: [{
-                    message: { role: 'assistant', content: `[Proxy Intercept - Error: ${errorMsg}]` },
-                    finish_reason: 'stop'
-                }]
-            });
-        }
+        const response = await axios.post(targetUrl, nativePayload, {
+            headers: { 'Content-Type': 'application/json' }
+        });
 
-        const candidate = response.data.candidates?.[0];
+        const candidate = response.data?.candidates?.[0];
         
-        // If Google blocks the response text due to safety triggers, return a safe recovery message instead of crashing
-        if (!candidate || !candidate.content?.parts?.[0]?.text) {
-            return res.status(200).json({
-                choices: [{
-                    message: { role: 'assistant', content: "[OOC: The model hesitated on that phrasing. Try tweaking your message slightly or re-rolling.]" },
-                    finish_reason: 'stop'
-                }]
-            });
+        // Pull text directly even if safety ratings flagged it, forcing raw text through
+        let generatedText = '';
+        if (candidate?.content?.parts) {
+            generatedText = candidate.content.parts.map(p => p.text || '').join('');
         }
 
-        const generatedText = candidate.content.parts[0].text;
+        // If it's completely blank, pass a simple dot instead of an error message so it never complains
+        if (!generatedText) {
+            generatedText = ".";
+        }
 
         const openAiFormattedResponse = {
             id: `chatcmpl-${Date.now()}`,
@@ -91,14 +78,16 @@ app.post(['/v1', '/v1/chat/completions', '/chat/completions'], async (req, res) 
             ]
         };
 
-        res.status(200).json(openAiFormattedResponse);
+        return res.status(200).json(openAiFormattedResponse);
 
     } catch (error) {
-        console.error('Fatal Proxy Error:', error.message);
-        // Always return HTTP 200 with an assistant message so JanitorAI never throws pgshag2
-        res.status(200).json({
+        console.error('API Error:', error.response?.data || error.message);
+        const errDetails = error.response?.data?.error?.message || error.message;
+        
+        // Return the exact error block or a clean continuation so JanitorAI displays text instead of crashing
+        return res.status(200).json({
             choices: [{
-                message: { role: 'assistant', content: "[Proxy Error Handled: A communication glitch occurred. Try sending your message again.]" },
+                message: { role: 'assistant', content: `[Error caught: ${errDetails}]` },
                 finish_reason: 'stop'
             }]
         });
