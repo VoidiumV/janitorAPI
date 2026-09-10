@@ -8,22 +8,18 @@ app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 
 app.get('/', (req, res) => {
-    res.status(200).send('Proxy status: Online and running.');
+    res.status(200).send('Proxy status: Online and running (OpenRouter).');
 });
 
-function normalizeMessages(messages) {
-    const result = [];
+// Helper function to flatten or extract system messages and normalize format
+function extractSystemAndMessages(messages) {
+    let systemInstruction = '';
+    const formattedMessages = [];
 
     for (const msg of messages) {
         if (!msg || !msg.content) continue;
 
-        const role =
-            msg.role === 'assistant' ? 'model' :
-            msg.role === 'system' ? 'system' :
-            'user';
-
-        if (role === 'system') continue;
-
+        const role = msg.role;
         const text =
             typeof msg.content === 'string'
                 ? msg.content
@@ -36,66 +32,35 @@ function normalizeMessages(messages) {
 
         if (!text.trim()) continue;
 
-        // Gemini works best when consecutive messages
-        // from the same role are combined.
-        const previous = result[result.length - 1];
-
-        if (previous && previous.role === role) {
-            previous.parts[0].text += '\n\n' + text;
+        if (role === 'system') {
+            systemInstruction += (systemInstruction ? '\n\n' : '') + text;
         } else {
-            result.push({
-                role,
-                parts: [{ text }]
+            // OpenRouter expects standard OpenAI roles: 'user', 'assistant', 'system'
+            formattedMessages.push({
+                role: role === 'assistant' ? 'assistant' : 'user',
+                content: text
             });
         }
     }
 
-    // Gemini conversation history should begin with a user message.
-    while (result.length && result[0].role !== 'user') {
-        result.shift();
-    }
-
-    return result;
-}
-
-function getSystemInstruction(messages) {
-    const systemMessages = messages.filter(
-        msg => msg && msg.role === 'system' && msg.content
-    );
-
-    if (!systemMessages.length) return null;
-
-    return systemMessages
-        .map(msg => {
-            if (typeof msg.content === 'string') {
-                return msg.content;
-            }
-
-            if (Array.isArray(msg.content)) {
-                return msg.content
-                    .filter(part => part && part.type === 'text')
-                    .map(part => part.text || '')
-                    .join('');
-            }
-
-            return '';
-        })
-        .filter(Boolean)
-        .join('\n\n');
+    return { systemInstruction, formattedMessages };
 }
 
 function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-async function generateWithRetry(targetUrl, payload) {
+async function generateWithRetry(targetUrl, payload, apiKey) {
     const maxAttempts = 3;
 
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
         try {
             return await axios.post(targetUrl, payload, {
                 headers: {
-                    'Content-Type': 'application/json'
+                    'Authorization': `Bearer ${apiKey}`,
+                    'Content-Type': 'application/json',
+                    'HTTP-Referer': 'https://janitorai.com', // Optional: Identifies app to OpenRouter
+                    'X-Title': 'JanitorCustomProxy'         // Optional: Identifies app name
                 },
                 timeout: 120000,
                 validateStatus: () => true
@@ -120,29 +85,27 @@ app.post(
     ['/v1', '/v1/chat/completions', '/chat/completions'],
     async (req, res) => {
         try {
-            const apiKey = process.env.GEMINI_API_KEY;
+            // Grab your OpenRouter API Key from Render environment variables
+            const apiKey = process.env.OPENROUTER_API_KEY || process.env.GEMINI_API_KEY;
 
             if (!apiKey) {
                 return res.status(500).json({
                     error: {
-                        message: 'GEMINI_API_KEY is not configured on the server.'
+                        message: 'API key is not configured on the server. Please set OPENROUTER_API_KEY in Render.'
                     }
                 });
             }
 
-            const rawModel = req.body.model || 'gemini-2.5-flash';
-
+            // Default to a strong free OpenRouter roleplay-friendly model if none specified, 
+            // or accept whatever model Janitor AI passes over.
+            const rawModel = req.body.model || 'deepseek/deepseek-chat:free';
             const modelName = rawModel
                 .replace(/^google\//, '')
                 .replace(/^models\//, '');
 
-            const targetUrl =
-                `https://generativelanguage.googleapis.com/v1beta/models/` +
-                `${modelName}:generateContent?key=${apiKey}`;
+            const targetUrl = 'https://openrouter.ai/api/v1/chat/completions';
 
-            const messages = Array.isArray(req.body.messages)
-                ? req.body.messages
-                : [];
+            const messages = Array.isArray(req.body.messages) ? req.body.messages : [];
 
             if (!messages.length) {
                 return res.status(400).json({
@@ -152,68 +115,24 @@ app.post(
                 });
             }
 
-            const contents = normalizeMessages(messages);
-            const systemInstruction = getSystemInstruction(messages);
+            const { systemInstruction, formattedMessages } = extractSystemAndMessages(messages);
 
-            if (!contents.length) {
-                return res.status(400).json({
-                    error: {
-                        message: 'No usable conversation messages were supplied.'
-                    }
-                });
-            }
-
-            const nativePayload = {
-                contents,
-
-                generationConfig: {
-                    temperature:
-                        typeof req.body.temperature === 'number'
-                            ? req.body.temperature
-                            : 1.1,
-
-                    maxOutputTokens:
-                        Number(req.body.max_tokens) > 0
-                            ? Number(req.body.max_tokens)
-                            : 2000
-                }
+            // Reconstruct payload for OpenRouter's OpenAI-compatible schema
+            const openAiPayload = {
+                model: modelName,
+                messages: [
+                    ...(systemInstruction ? [{ role: 'system', content: systemInstruction }] : []),
+                    ...formattedMessages
+                ],
+                temperature: typeof req.body.temperature === 'number' ? req.body.temperature : 0.9,
+                max_tokens: Number(req.body.max_tokens) > 0 ? Number(req.body.max_tokens) : 2000
             };
 
-            if (systemInstruction) {
-                nativePayload.systemInstruction = {
-                    parts: [
-                        {
-                            text: systemInstruction
-                        }
-                    ]
-                };
-            }
-
-            // Keep Google's normal safety behavior rather than attempting
-            // to circumvent it.
-            nativePayload.safetySettings = [
-                {
-                    category: 'HARM_CATEGORY_HARASSMENT',
-                    threshold: 'BLOCK_NONE'
-                },
-                {
-                    category: 'HARM_CATEGORY_HATE_SPEECH',
-                    threshold: 'BLOCK_NONE'
-                },
-                {
-                    category: 'HARM_CATEGORY_DANGEROUS_CONTENT',
-                    threshold: 'BLOCK_NONE'
-                }
-            ];
-
-            const response = await generateWithRetry(
-                targetUrl,
-                nativePayload
-            );
+            const response = await generateWithRetry(targetUrl, openAiPayload, apiKey);
 
             if (response.status < 200 || response.status >= 300) {
                 console.error(
-                    'Gemini API error:',
+                    'OpenRouter API error:',
                     response.status,
                     response.data
                 );
@@ -222,83 +141,14 @@ app.post(
                     error: {
                         message:
                             response.data?.error?.message ||
-                            `Gemini returned HTTP ${response.status}.`,
+                            `OpenRouter returned HTTP ${response.status}.`,
                         status: response.status
                     }
                 });
             }
 
-            const candidate = response.data?.candidates?.[0];
-
-            if (!candidate) {
-                console.error(
-                    'Gemini returned no candidate:',
-                    response.data
-                );
-
-                return res.status(502).json({
-                    error: {
-                        message: 'Gemini returned no response candidate.'
-                    }
-                });
-            }
-
-            if (candidate.finishReason === 'SAFETY') {
-                console.error(
-                    'Gemini blocked the response for safety reasons.',
-                    candidate.safetyRatings || ''
-                );
-
-                return res.status(400).json({
-                    error: {
-                        message: 'Gemini blocked this response.',
-                        finish_reason: 'SAFETY'
-                    }
-                });
-            }
-
-            let generatedText = '';
-
-            if (candidate.content?.parts) {
-                generatedText = candidate.content.parts
-                    .map(part => part.text || '')
-                    .join('');
-            }
-
-            if (!generatedText.trim()) {
-                console.error(
-                    'Gemini returned an empty response:',
-                    response.data
-                );
-
-                return res.status(502).json({
-                    error: {
-                        message: 'Gemini returned an empty response.'
-                    }
-                });
-            }
-
-            const openAiFormattedResponse = {
-                id: `chatcmpl-${Date.now()}`,
-                object: 'chat.completion',
-                created: Math.floor(Date.now() / 1000),
-                model: modelName,
-                choices: [
-                    {
-                        index: 0,
-                        message: {
-                            role: 'assistant',
-                            content: generatedText
-                        },
-                        finish_reason:
-                            candidate.finishReason === 'MAX_TOKENS'
-                                ? 'length'
-                                : 'stop'
-                    }
-                ]
-            };
-
-            return res.status(200).json(openAiFormattedResponse);
+            // OpenRouter responds directly in OpenAI format, so we can forward it back cleanly
+            return res.status(200).json(response.data);
 
         } catch (error) {
             console.error(
@@ -311,7 +161,7 @@ app.post(
                     message:
                         error.response?.data?.error?.message ||
                         error.message ||
-                        'The proxy could not reach Gemini.'
+                        'The proxy could not reach OpenRouter.'
                 }
             });
         }
@@ -321,5 +171,5 @@ app.post(
 const PORT = process.env.PORT || 3000;
 
 app.listen(PORT, () => {
-    console.log(`Active proxy running on port ${PORT}`);
+    console.log(`Active OpenRouter proxy running on port ${PORT}`);
 });
